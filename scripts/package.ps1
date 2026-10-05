@@ -18,6 +18,9 @@ try {
     foreach($name in 'Core','Gui','Widgets','Network'){
         Copy-Item -LiteralPath "$resolvedQt/bin/Qt6$name.dll" -Destination $runtime -Force
     }
+    # The deployment scanner selects the visible Windows plugin; unattended
+    # screenshot and DLL-consumer checks also need the headless platform plugin.
+    Copy-Item -LiteralPath "$resolvedQt/plugins/platforms/qoffscreen.dll" -Destination "$runtime/platforms" -Force
     $vswhere="${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
     $vsRoot=(& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
     $crt=Get-ChildItem -LiteralPath "$vsRoot/VC/Redist/MSVC" -Recurse -Directory | Where-Object { $_.FullName -match '\\x64\\Microsoft\.VC143\.CRT$' -and $_.FullName -notmatch 'onecore' } | Sort-Object FullName -Descending | Select-Object -First 1
