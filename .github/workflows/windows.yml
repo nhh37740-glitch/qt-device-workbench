@@ -1,5 +1,8 @@
 name: build-test-binary-delivery
 on: [push, pull_request, workflow_dispatch]
+concurrency:
+  group: '${{ github.workflow }}-${{ github.ref }}'
+  cancel-in-progress: true
 jobs:
   windows:
     runs-on: windows-2022
@@ -24,7 +27,7 @@ jobs:
         with:
           name: windows-binaries-and-test-evidence
           path: |
-            dist/*.zip
+            dist/**/*.zip
             build/module-tests.xml
             build/process-evidence/
             build/delivery-evidence/

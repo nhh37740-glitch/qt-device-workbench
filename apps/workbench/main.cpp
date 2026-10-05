@@ -13,19 +13,25 @@
 #include <type_traits>
 
 int main(int argc,char **argv) {
-    for(int i=1;i<argc;++i) if(QByteArray(argv[i])=="--headless") qputenv("QT_QPA_PLATFORM","offscreen");
+    for(int i=1;i<argc;++i) if(QByteArray(argv[i])=="--headless") {
+        qputenv("QT_QPA_PLATFORM","offscreen");
+        qputenv("QT_QPA_FONTDIR",(qEnvironmentVariable("SystemRoot","C:/Windows")+"/Fonts").toUtf8());
+    }
     QApplication app(argc,argv);
     app.setApplicationName("device-workbench"); app.setApplicationVersion("1.0.0");
     wb::registerTypes();
     QCommandLineParser p;p.addHelpOption();p.addVersionOption();
-    p.addOptions({{{"headless"},"Run the actual GUI offscreen for automated validation"},
-        {{"capture"},"Connect and start capturing automatically"},
-        {{"device-host"},"Device address","host","127.0.0.1"},{{"device-port"},"Device port","port","9101"},
-        {{"sink-host"},"Downstream address","host","127.0.0.1"},{{"sink-port"},"Downstream port","port","9102"},
-        {{"interval-ms"},"Measurement interval","ms","100"},{{"duration-ms"},"Quit after duration","ms","0"},
-        {{"record"},"CSV output file","path"},{{"report"},"Write verification report JSON on exit","path"},
-        {{"screenshot"},"Save rendered GUI screenshot","path"},{{"fault"},"none|fragment|malformed|disconnect|delay","mode","none"},
-        {{"fault-every"},"Apply fault every Nth sample","n","7"}});
+    auto option=[&](const char *name,const char *description,const char *valueName="",const char *defaultValue=""){
+        p.addOption(QCommandLineOption(QString::fromLatin1(name),QString::fromUtf8(description),QString::fromLatin1(valueName),QString::fromLatin1(defaultValue)));
+    };
+    option("headless","Run the actual GUI offscreen for automated validation");
+    option("capture","Connect and start capturing automatically");
+    option("device-host","Device address","host","127.0.0.1");option("device-port","Device port","port","9101");
+    option("sink-host","Downstream address","host","127.0.0.1");option("sink-port","Downstream port","port","9102");
+    option("interval-ms","Measurement interval","ms","100");option("duration-ms","Quit after duration","ms","0");
+    option("record","CSV output file","path");option("report","Write verification report JSON on exit","path");
+    option("screenshot","Save rendered GUI screenshot","path");option("fault","none|fragment|malformed|disconnect|delay","mode","none");
+    option("fault-every","Apply fault every Nth sample","n","7");
     p.process(app);
     bool okDevice=false,okSink=false,okInterval=false,okDuration=false,okEvery=false;
     const int devicePort=p.value("device-port").toInt(&okDevice),sinkPort=p.value("sink-port").toInt(&okSink),interval=p.value("interval-ms").toInt(&okInterval),duration=p.value("duration-ms").toInt(&okDuration),every=p.value("fault-every").toInt(&okEvery);
