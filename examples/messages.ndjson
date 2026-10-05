@@ -1,0 +1,5 @@
+{"v":1,"type":"command","id":"cmd-1","action":"start","intervalMs":100}
+{"v":1,"type":"ack","id":"cmd-1","ok":true,"detail":"started"}
+{"v":1,"type":"sample","deviceId":"sim-001","sequence":1,"timestampMs":1791216000000,"temperature":25.6,"humidity":60.2,"voltage":3.3}
+{"v":1,"type":"received","deviceId":"sim-001","sequence":1}
+{"v":1,"type":"command","id":"cmd-2","action":"stop"}

@@ -1,0 +1,8 @@
+build/
+dist/
+runtime/
+evidence/
+*.user
+__pycache__/
+.env
+*.zip
