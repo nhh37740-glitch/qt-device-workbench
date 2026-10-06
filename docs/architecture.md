@@ -4,7 +4,7 @@ Build an original generic Qt device workbench inspired by Serial Studio's receiv
 
 ## Programs and threads
 
-device-simulator.exe: one Qt event-loop thread; device_simulator DLL generates measurements, wire_protocol DLL frames messages and simulates fragmented writes.
+device-simulator.exe: one Qt event-loop thread; device_simulator DLL replays prepared public measurements by default; wire_protocol DLL frames messages and simulates fragmented writes. The explicit --synthetic CLI mode retains sine fixtures for protocol exercises. replayFile is an optional QObject property configured before listen; no public factory/slot or v1 wire contract changes.
 device-workbench.exe: main GUI thread owns frontend DLL; a receive/process QThread owns device_source DLL and its codec/socket/timers; a file QThread owns record_store DLL; an outbound QThread owns result_push DLL and its codec/socket/timers.
 result-receiver.exe: one event-loop thread; result_receiver DLL receives, validates, deduplicates and saves accepted records.
 
@@ -25,6 +25,7 @@ Command example: {"v":1,"type":"command","id":"cmd-1","action":"start","interval
 Actions: start interval 10..60000 milliseconds, stop, fault (mode none|fragment|malformed|disconnect|delay, every positive integer). Device ID sim-001. On fault, every Nth sample is modified; delay schedules a delayed send without blocking; disconnect aborts connection. Fault acknowledgements are valid normal messages. Start/stop ack: {"v":1,"type":"ack","id":"cmd-1","ok":true,"detail":"started"}. Invalid command receives ok=false; stop stops measurement scheduling.
 Sample: {"v":1,"type":"sample","deviceId":"sim-001","sequence":1,"timestampMs":1791216000000,"temperature":25.6,"humidity":60.2,"voltage":3.3}
 Validation: nonempty device ID; integer sequence>=1 and timestampMs>=1; finite temperature -100..200, humidity 0..100, voltage 0..1000. Reject strings used in place of numbers, missing fields, wrong type/version and noninteger integers. JSON integers fit exact double integer range <=9007199254740991.
+Finite recorded replay sends an optional terminal envelope after its final queued sample: {"v":1,"type":"stream_end","deviceId":"intel-lab-mote1","sequence":4096,"reason":"replay_finished"}. The receiver accepts it only for a previously seen device and a positive integer sequence no lower than that device's last validated sample; gaps can come from deliberately corrupted sample messages. It clears capture intent and reports replay completion to the GUI. Unknown/stale/invalid terminal messages remain errors. Sample and CSV contracts are unchanged.
 DeviceSource reconnects after disconnect using nonblocking timer. Track requested measurement interval and restart after reconnect. Reject duplicate/out-of-order samples within same device session; sequence in Simulator monotonically increases across reconnect, starts at 1 for new simulator process. Device restart with sequence reset requires reconnect/new session detection (document and test behavior). Pending command acknowledgements time out after 2 seconds and report failure. DeviceSource exposes all signals in contracts.h, no new public API.
 
 ## Saving and pushing

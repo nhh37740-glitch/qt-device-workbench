@@ -1,6 +1,11 @@
 #include <workbench/contracts.h>
 #include <QtCore/QDateTime>
 #include <QtCore/QElapsedTimer>
+#include <QtCore/QFile>
+#include <QtCore/QRegularExpression>
+#include <QtCore/QStringDecoder>
+#include <QtCore/QStringList>
+#include <QtCore/QVariant>
 #include <QtCore/QTimer>
 #include <QtNetwork/QHostAddress>
 #include <QtNetwork/QTcpServer>
@@ -11,6 +16,95 @@
 namespace {
 constexpr qsizetype MaxQueuedBytes = 262144;
 constexpr size_t MaxQueuedFrames = 256;
+constexpr qsizetype MaxReplayRows = 100000;
+// Logical rows may contain quoted commas, escaped quotes and quoted newlines.
+// Read incrementally so malformed files cannot cause unbounded accumulation.
+bool readReplayRow(QFile &file, QList<QByteArray> &fields, bool &eof, QString &detail)
+{
+    enum class State { Empty, Unquoted, Quoted, Closed } state = State::Empty;
+    QByteArray field;
+    qsizetype rowBytes = 0;
+    char ch;
+    while (file.getChar(&ch)) {
+        if (++rowBytes > 65536) { detail = QStringLiteral("row exceeds 65536 bytes"); return false; }
+        if (state == State::Quoted) {
+            if (ch == '"') state = State::Closed;
+            else field.append(ch);
+            continue;
+        }
+        if (state == State::Closed && ch == '"') {
+            field.append(ch); state = State::Quoted; continue;
+        }
+        if (ch == ',' || ch == '\n' || ch == '\r') {
+            fields.append(field); field.clear(); state = State::Empty;
+            if (fields.size() > 6) { detail = QStringLiteral("too many columns"); return false; }
+            if (ch == ',') continue;
+            if (ch == '\r' && file.peek(1) == "\n") file.getChar(&ch);
+            eof = false; return true;
+        }
+        if (state == State::Closed || (state == State::Unquoted && ch == '"')) {
+            detail = QStringLiteral("invalid CSV quoting"); return false;
+        }
+        if (state == State::Empty && ch == '"') state = State::Quoted;
+        else { field.append(ch); state = State::Unquoted; }
+    }
+    if (file.error() != QFileDevice::NoError) { detail = file.errorString(); return false; }
+    if (state == State::Quoted) { detail = QStringLiteral("unterminated CSV quote"); return false; }
+    eof = rowBytes == 0;
+    if (!eof) fields.append(field);
+    return true;
+}
+bool loadReplay(const QString &path, wb::SampleBatch &rows, QString &detail)
+{
+    QFile file(path);
+    if (path.isEmpty() || !file.open(QIODevice::ReadOnly)) {
+        detail = QStringLiteral("cannot open data file: ") + path + QStringLiteral(" ") + file.errorString();
+        return false;
+    }
+    QList<QByteArray> fields;
+    bool eof = false;
+    if (!readReplayRow(file, fields, eof, detail) || eof || fields != QList<QByteArray>{
+        "deviceId", "sequence", "timestampMs", "temperature", "humidity", "voltage"}) {
+        detail = QStringLiteral("invalid CSV header: ") + detail; return false;
+    }
+    const QRegularExpression digits(QStringLiteral("^[0-9]+$"));
+    for (qsizetype line = 2;; ++line) {
+        fields.clear();
+        if (!readReplayRow(file, fields, eof, detail)) {
+            detail = QStringLiteral("row %1: ").arg(line) + detail; return false;
+        }
+        if (eof) break;
+        if (rows.size() >= MaxReplayRows) { detail = QStringLiteral("data exceeds 100000 records"); return false; }
+        if (fields.size() != 6) { detail = QStringLiteral("row %1: expected six columns").arg(line); return false; }
+        QStringList values;
+        for (const auto &field : fields) {
+            QStringDecoder decoder(QStringDecoder::Utf8);
+            values.append(decoder(field));
+            if (decoder.hasError()) { detail = QStringLiteral("row %1: invalid UTF-8").arg(line); return false; }
+        }
+        bool sequenceOk, timestampOk, temperatureOk, humidityOk, voltageOk;
+        wb::Sample source;
+        source.deviceId = values[0];
+        source.sequence = values[1].toLongLong(&sequenceOk);
+        source.timestampMs = values[2].toLongLong(&timestampOk);
+        source.temperature = values[3].toDouble(&temperatureOk);
+        source.humidity = values[4].toDouble(&humidityOk);
+        source.voltage = values[5].toDouble(&voltageOk);
+        wb::Sample validated;
+        if (!digits.match(values[1]).hasMatch() || !digits.match(values[2]).hasMatch()
+            || !sequenceOk || !timestampOk || !temperatureOk || !humidityOk || !voltageOk
+            || !wb::sampleFromJson(wb::sampleToJson(source), validated, detail)) {
+            detail = QStringLiteral("row %1: invalid measurement ").arg(line) + detail; return false;
+        }
+        if (!rows.isEmpty() && (source.sequence <= rows.last().sequence
+                || source.timestampMs < rows.last().timestampMs)) {
+            detail = QStringLiteral("row %1: sequence/timestamp order regression").arg(line); return false;
+        }
+        rows.append(source);
+    }
+    if (rows.isEmpty()) { detail = QStringLiteral("data file contains no records"); return false; }
+    return true;
+}
 bool integerInRange(const QJsonValue &value, int minimum, int maximum, int &out)
 {
     if (!value.isDouble()) return false;
@@ -43,6 +137,7 @@ private:
     QString fault = QStringLiteral("none");
     int every = 1;
     int interval = 100;
+    qsizetype replayCursor = 0;
     QElapsedTimer clock;
 };
 
@@ -53,6 +148,23 @@ public:
     void listen(QString address, quint16 port) override
     {
         shutdown();
+        replayData.clear();
+        replayMode = property("replayFile").isValid();
+        setProperty("replayRows", 0);
+        setProperty("dataSource", replayMode ? QStringLiteral("recorded_replay") : QStringLiteral("synthetic_fixture"));
+        if (replayMode) {
+            QString detail;
+            if (!loadReplay(property("replayFile").toString(), replayData, detail)) {
+                replayData.clear();
+                emit error(QStringLiteral("replay_data_invalid: ") + detail);
+                return;
+            }
+            setProperty("replayRows", static_cast<int>(replayData.size()));
+            emit status(QStringLiteral("recorded_replay: %1 records from %2; recorded timestamps and values")
+                .arg(replayData.size()).arg(property("replayFile").toString()));
+        } else {
+            emit status(QStringLiteral("synthetic_fixture: generated measurements"));
+        }
         QHostAddress host;
         if (!host.setAddress(address)) {
             emit error(QStringLiteral("invalid_bind_address: ") + address);
@@ -100,10 +212,14 @@ public:
         if (wasListening) emit status(QStringLiteral("shutdown"));
     }
     qint64 nextSequence() { return ++sequence; }
+    bool isReplay() const { return replayMode; }
+    const wb::SampleBatch &replaySamples() const { return replayData; }
 private:
     QTcpServer *server = nullptr;
     QVector<Client *> clients;
     qint64 sequence = 0;
+    bool replayMode = false;
+    wb::SampleBatch replayData;
 };
 
 Client::Client(QTcpSocket *connection, SimulatorImpl *simulator)
@@ -154,6 +270,9 @@ void Client::command(const QJsonObject &object)
             acknowledge(id, false, QStringLiteral("invalid_interval")); return;
         }
         interval = requested;
+        if (owner->isReplay() && replayCursor >= owner->replaySamples().size()) {
+            acknowledge(id, false, QStringLiteral("replay_finished")); return;
+        }
         acknowledge(id, true, QStringLiteral("started"));
         generation->start(interval);
     } else if (action == QStringLiteral("stop")) {
@@ -176,25 +295,45 @@ void Client::command(const QJsonObject &object)
 }
 void Client::sample()
 {
+    if (owner->isReplay() && replayCursor >= owner->replaySamples().size()) {
+        generation->stop(); return;
+    }
     const qint64 sequence = owner->nextSequence();
+    wb::Sample value;
+    bool finalReplayRecord = false;
+    if (owner->isReplay()) {
+        value = owner->replaySamples().at(replayCursor++);
+        if (replayCursor == owner->replaySamples().size()) {
+            finalReplayRecord = true;
+            generation->stop();
+            emit owner->status(QStringLiteral("replay_finished"));
+        }
+    } else {
+        value.deviceId = QStringLiteral("sim-001");
+        value.timestampMs = QDateTime::currentMSecsSinceEpoch();
+        const double phase = static_cast<double>(sequence % 100000) * 0.07;
+        value.temperature = 25.0 + 5.0 * std::sin(phase);
+        value.humidity = 55.0 + 10.0 * std::cos(phase * 0.5);
+        value.voltage = 3.3 + 0.05 * std::sin(phase * 0.3);
+    }
+    // Sequence identifies transmission attempts; recorded values and time stay intact.
+    value.sequence = sequence;
     ++count;
     const bool inject = count % static_cast<quint64>(every) == 0;
     if (inject && fault == QStringLiteral("disconnect")) {
         generation->stop(); socket->abort(); return;
     }
-    wb::Sample value;
-    value.deviceId = QStringLiteral("sim-001");
-    value.sequence = sequence;
-    value.timestampMs = QDateTime::currentMSecsSinceEpoch();
-    const double phase = static_cast<double>(sequence % 100000) * 0.07;
-    value.temperature = 25.0 + 5.0 * std::sin(phase);
-    value.humidity = 55.0 + 10.0 * std::cos(phase * 0.5);
-    value.voltage = 3.3 + 0.05 * std::sin(phase * 0.3);
     if (inject && fault == QStringLiteral("malformed"))
         enqueue(QByteArrayLiteral("{\"v\":1,\"type\":\"sample\",broken}\n"));
     else
         enqueue(codec->encode(wb::sampleToJson(value)), inject && fault == QStringLiteral("fragment"),
                 inject && fault == QStringLiteral("delay") ? qBound(30, interval * 3, 500) : 0);
+    // End is a normal FIFO frame, following the final (possibly delayed/fragmented)
+    // sample or the deliberately malformed line. A disconnected client gets no end.
+    if (finalReplayRecord)
+        enqueue(codec->encode({{QStringLiteral("v"), 1}, {QStringLiteral("type"), QStringLiteral("stream_end")},
+            {QStringLiteral("deviceId"), value.deviceId}, {QStringLiteral("sequence"), static_cast<double>(sequence)},
+            {QStringLiteral("reason"), QStringLiteral("replay_finished")}}));
 }
 void Client::enqueue(QByteArray bytes, bool fragment, int delay)
 {

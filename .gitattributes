@@ -1,0 +1,2 @@
+# Preserve the reviewed dataset bytes and SHA256 values on Windows checkouts.
+data/** -text

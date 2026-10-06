@@ -51,6 +51,9 @@ for item in manifest['files']:
 
 assert json.loads((root / 'test-evidence/binary-only-summary.json').read_text(encoding='utf-8'))['passed']
 assert json.loads((root / 'test-evidence/dll-consumer.json').read_text(encoding='utf-8-sig'))['modulesLoaded'] == 7
+import subprocess
+import sys
+subprocess.run([sys.executable, str(Path(__file__).with_name('import_public_data.py')), '--output', str(root / 'programs/device-simulator/data')], check=True)
 for license in ('LGPL-3.0-only.txt', 'GPL-3.0-only.txt', 'Qt-GPL-exception-1.0.txt'):
     assert (root / 'licenses' / license).stat().st_size > 500
 print(f'PASS: {len(expected_programs)} real EXEs, {len(expected_modules)} module DLLs/import libraries, runtime dependencies, binary-only tests, and {len(manifest["files"])} SHA256 checks.')

@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][string]$QtRoot,[string]$Version='1.0.0')
+param([Parameter(Mandatory=$true)][string]$QtRoot,[string]$Version='1.1.0')
 $ErrorActionPreference='Stop'
 $projectRoot=Split-Path $PSScriptRoot -Parent
 $resolvedQt=(Resolve-Path -LiteralPath $QtRoot).Path
@@ -82,15 +82,25 @@ Microsoft compiler runtime redistributable DLLs are included for Windows x64 exe
        if($LASTEXITCODE -ne 0){throw 'Delivered module DLL interface consumer failed'}
     } finally {$env:PATH=$originalPath}
     @'
-param([int]$Seconds=300)
+param([ValidateRange(0,86400)][int]$Seconds=0)
 $ErrorActionPreference='Stop'
 $duration=$Seconds*1000
 $runtime=Join-Path $PSScriptRoot 'runtime'
 New-Item -ItemType Directory -Force -Path $runtime | Out-Null
-Start-Process -FilePath "$PSScriptRoot/programs/device-simulator/device-simulator.exe" -ArgumentList '--duration-ms',$duration -WindowStyle Hidden
-Start-Process -FilePath "$PSScriptRoot/programs/result-receiver/result-receiver.exe" -ArgumentList '--duration-ms',$duration,'--output',('"'+$runtime+'/downstream.ndjson"') -WindowStyle Hidden
-& "$PSScriptRoot/programs/device-workbench/device-workbench.exe" --capture --record "$runtime/measurements.csv" --duration-ms $duration
+$services=@()
+try {
+    $services+=Start-Process -FilePath "$PSScriptRoot/programs/device-simulator/device-simulator.exe" -ArgumentList '--duration-ms',$duration -WindowStyle Hidden -PassThru
+    $services+=Start-Process -FilePath "$PSScriptRoot/programs/result-receiver/result-receiver.exe" -ArgumentList '--duration-ms',$duration,'--output',('"'+$runtime+'/downstream.ndjson"') -WindowStyle Hidden -PassThru
+    $dashboard=Start-Process -FilePath "$PSScriptRoot/programs/device-workbench/device-workbench.exe" -ArgumentList '--capture','--record',('"'+$runtime+'/measurements.csv"'),'--report',('"'+$runtime+'/demo-report.json"'),'--duration-ms',$duration -PassThru
+    $dashboard.WaitForExit()
+} finally {
+    foreach($service in $services){if(-not $service.HasExited){Stop-Process -Id $service.Id}}
+}
 '@ | Set-Content -LiteralPath "$packageRoot/start-demo.ps1" -Encoding utf8
+    @'
+@echo off
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-demo.ps1"
+'@ | Set-Content -LiteralPath "$packageRoot/start-demo.cmd" -Encoding ascii
     & python tests/process_test.py --bin "$packageRoot/programs" --layout programs --evidence build/delivery-evidence
     if($LASTEXITCODE -ne 0){throw 'Binary-only deployment tests failed'}
     New-Item -ItemType Directory -Force -Path "$packageRoot/test-evidence" | Out-Null

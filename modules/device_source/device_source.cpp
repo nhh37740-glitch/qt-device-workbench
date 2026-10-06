@@ -4,6 +4,7 @@
 #include <QtCore/QStringList>
 #include <QtCore/QTimer>
 #include <QtNetwork/QTcpSocket>
+#include <cmath>
 
 namespace {
 class Source final : public wb::DeviceSource {
@@ -174,6 +175,28 @@ private:
             }
             m_lastSequence.insert(sample.deviceId, sample.sequence);
             emit sampleReady(sample);
+        } else if (type == "stream_end") {
+            const auto deviceValue = message.value("deviceId");
+            const auto sequenceValue = message.value("sequence");
+            const auto reasonValue = message.value("reason");
+            const double sequence = sequenceValue.toDouble(-1);
+            if (!deviceValue.isString() || deviceValue.toString().isEmpty()
+                || !sequenceValue.isDouble() || !std::isfinite(sequence)
+                || sequence < 1 || sequence > 9007199254740991.0 || std::floor(sequence) != sequence
+                || !reasonValue.isString() || reasonValue.toString() != "replay_finished") {
+                emit error(QStringLiteral("invalid replay stream_end message"));
+                return;
+            }
+            const auto deviceId = deviceValue.toString();
+            // Malformed transport samples still consume simulator sequences.
+            // A terminal end may legitimately skip them, but cannot refer to an
+            // unknown device or precede its last validated sample in this session.
+            if (!m_lastSequence.contains(deviceId) || qint64(sequence) < m_lastSequence.value(deviceId)) {
+                emit error(QStringLiteral("unmatched or stale replay stream_end message"));
+                return;
+            }
+            m_captureWanted = false;
+            emit status(QStringLiteral("replay_finished"));
         } else if (type == "ack") {
             const auto idValue = message.value("id");
             if (!idValue.isString() || idValue.toString().isEmpty() ||

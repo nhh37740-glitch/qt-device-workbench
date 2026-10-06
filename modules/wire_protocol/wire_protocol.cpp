@@ -12,7 +12,8 @@ bool envelopeValid(const QJsonObject &object)
         return false;
     const QString name = type.toString();
     return name == QStringLiteral("command") || name == QStringLiteral("ack")
-        || name == QStringLiteral("sample") || name == QStringLiteral("received");
+        || name == QStringLiteral("sample") || name == QStringLiteral("received")
+        || name == QStringLiteral("stream_end");
 }
 
 class NdjsonCodec final : public wb::WireCodec {
