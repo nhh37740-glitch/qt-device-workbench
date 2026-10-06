@@ -41,6 +41,17 @@ private slots:
         QTRY_COMPARE(messages.count(), 4);
         QCOMPARE(errors.count(), 4); // One error for the entire discarded line.
         QCOMPARE(messages.last().first().toJsonObject().value("id").toString(), QStringLiteral("one"));
+        const QJsonObject end{{"v", 1}, {"type", "stream_end"}, {"deviceId", "intel-lab-mote1"},
+            {"sequence", 7}, {"reason", "replay_finished"}};
+        const QByteArray endFrame = codec->encode(end);
+        QVERIFY(!endFrame.isEmpty());
+        client.write(endFrame.left(15));
+        QTRY_COMPARE(client.bytesToWrite(), qint64(0));
+        QCOMPARE(messages.count(), 4);
+        client.write(endFrame.mid(15));
+        QTRY_COMPARE(messages.count(), 5);
+        QCOMPARE(messages.last().first().toJsonObject(), end);
+        QCOMPARE(errors.count(), 4);
     }
     void resetAndEncodingLimits()
     {

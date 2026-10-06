@@ -4,6 +4,9 @@
 #include <QtCore/QTimer>
 #include <QtCore/QElapsedTimer>
 #include <QtCore/QThread>
+#include <QtCore/QFile>
+#include <QtCore/QTemporaryDir>
+#include <QtCore/QVariant>
 #include <QtNetwork/QHostAddress>
 #include <QtNetwork/QTcpSocket>
 
@@ -14,13 +17,16 @@ public:
     QTcpSocket socket;
     QVector<QJsonObject> messages;
     QVector<QString> wireErrors;
+    QVector<QString> statuses;
     quint16 port = 0;
-    Harness()
+    explicit Harness(const QString &replayPath = {})
     {
         connect(simulator, &wb::Simulator::listening, this, [this](quint16 p) { port = p; });
         connect(&socket, &QTcpSocket::readyRead, this, [this] { codec->feed(socket.readAll()); });
         connect(codec, &wb::WireCodec::message, this, [this](QJsonObject object) { messages.append(object); });
         connect(codec, &wb::WireCodec::error, this, [this](QString detail) { wireErrors.append(detail); });
+        connect(simulator, &wb::Simulator::status, this, [this](QString detail) { statuses.append(detail); });
+        if (!replayPath.isNull()) simulator->setProperty("replayFile", replayPath);
         simulator->listen(QStringLiteral("127.0.0.1"), 0);
         socket.connectToHost(QHostAddress::LocalHost, port);
     }
@@ -44,6 +50,13 @@ public:
             wb::Sample value; QString error;
             if (wb::sampleFromJson(object, value, error)) values.append(value);
         }
+        return values;
+    }
+    QVector<QJsonObject> ends() const
+    {
+        QVector<QJsonObject> values;
+        for (const auto &object : messages)
+            if (object.value("type") == QStringLiteral("stream_end")) values.append(object);
         return values;
     }
 };
@@ -89,6 +102,7 @@ private slots:
         window.start(80);
         QTRY_COMPARE(elapsed.count(), 1);
         QCOMPARE(h.samples().size(), stoppedCount);
+        QVERIFY(h.ends().isEmpty());
         h.simulator->shutdown();
         QTRY_COMPARE(h.socket.state(), QAbstractSocket::UnconnectedState);
         h.simulator->listen(QStringLiteral("127.0.0.1"), 0);
@@ -191,6 +205,204 @@ private slots:
         QTRY_VERIFY(firstSampleAt >= 0);
         QVERIFY(firstSampleAt >= 140); // 40 ms period + 120 ms injected delay, with timer tolerance.
         QVERIFY(ticks >= 5);
+    }
+    void recordedReplayPreservesValuesAndFinishes_data()
+    {
+        QTest::addColumn<int>("rowCount");
+        QTest::newRow("two-records") << 2;
+        QTest::newRow("three-records") << 3;
+    }
+    void recordedReplayPreservesValuesAndFinishes()
+    {
+        QFETCH(int, rowCount);
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        QFile file(directory.filePath(QStringLiteral("replay.csv")));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QByteArray csv = "deviceId,sequence,timestampMs,temperature,humidity,voltage\n"
+            "\"intel-lab-mote1\",1,1078012800123,19.9884,37.0933,2.69964\n"
+            "intel-lab-mote1,2,1078012800123,20.0189,36.9586,2.68742\n";
+        if (rowCount == 3) csv += "intel-lab-mote1,3,1078012801567,20.0397,36.7902,2.67531\n";
+        QCOMPARE(file.write(csv), qint64(csv.size()));
+        file.close();
+        Harness h(file.fileName());
+        QVERIFY(h.port != 0);
+        QCOMPARE(h.simulator->property("dataSource").toString(), QStringLiteral("recorded_replay"));
+        QCOMPARE(h.simulator->property("replayRows").toInt(), rowCount);
+        QTRY_COMPARE(h.socket.state(), QAbstractSocket::ConnectedState);
+        h.send("start", "start", {{"intervalMs", 20}});
+        QTRY_COMPARE(h.samples().size(), rowCount);
+        QTRY_COMPARE(h.ends().size(), 1);
+        QVERIFY(h.statuses.contains(QStringLiteral("replay_finished")));
+        const auto values = h.samples();
+        const QJsonObject expectedEnd{{"v", 1}, {"type", "stream_end"}, {"deviceId", "intel-lab-mote1"},
+            {"sequence", static_cast<double>(values.last().sequence)}, {"reason", "replay_finished"}};
+        QCOMPARE(h.ends().first(), expectedEnd);
+        QCOMPARE(h.messages.last(), expectedEnd);
+        QCOMPARE(values.at(0).deviceId, QStringLiteral("intel-lab-mote1"));
+        QCOMPARE(values.at(0).timestampMs, qint64(1078012800123));
+        QCOMPARE(values.at(0).temperature, 19.9884);
+        QCOMPARE(values.at(0).humidity, 37.0933);
+        QCOMPARE(values.at(0).voltage, 2.69964);
+        QCOMPARE(values.at(1).timestampMs, qint64(1078012800123));
+        QCOMPARE(values.at(1).temperature, 20.0189);
+        QCOMPARE(values.at(1).humidity, 36.9586);
+        QCOMPARE(values.at(1).voltage, 2.68742);
+        if (rowCount == 3) {
+            QCOMPARE(values.at(2).timestampMs, qint64(1078012801567));
+            QCOMPARE(values.at(2).temperature, 20.0397);
+            QCOMPARE(values.at(2).humidity, 36.7902);
+            QCOMPARE(values.at(2).voltage, 2.67531);
+        }
+        h.send("exhausted", "start", {{"intervalMs", 10}});
+        QTRY_VERIFY(!h.ack("exhausted").isEmpty());
+        QVERIFY(!h.ack("exhausted").value("ok").toBool());
+        QCOMPARE(h.ack("exhausted").value("detail").toString(), QStringLiteral("replay_finished"));
+        QTimer window;
+        window.setSingleShot(true);
+        QSignalSpy elapsed(&window, &QTimer::timeout);
+        window.start(100);
+        QTRY_COMPARE(elapsed.count(), 1);
+        QCOMPARE(h.samples().size(), rowCount);
+        QCOMPARE(h.ends().size(), 1);
+        const qint64 lastSequence = values.last().sequence;
+        h.socket.abort();
+        h.codec->reset();
+        h.socket.connectToHost(QHostAddress::LocalHost, h.port);
+        QTRY_COMPARE(h.socket.state(), QAbstractSocket::ConnectedState);
+        h.send("new-session", "start", {{"intervalMs", 20}});
+        QTRY_COMPARE(h.samples().size(), 2 * rowCount);
+        QTRY_COMPARE(h.ends().size(), 2);
+        const auto firstReplay = h.samples().at(rowCount);
+        QVERIFY(firstReplay.sequence > lastSequence);
+        QCOMPARE(firstReplay.timestampMs, values.first().timestampMs);
+        QCOMPARE(firstReplay.temperature, values.first().temperature);
+    }
+    void recordedReplayStopStartResumesCursor()
+    {
+        QTemporaryDir directory;
+        QFile file(directory.filePath(QStringLiteral("pause.csv")));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray csv = "deviceId,sequence,timestampMs,temperature,humidity,voltage\n"
+            "intel-lab-mote1,1,1078012800000,20.1,40.1,2.7\n"
+            "intel-lab-mote1,2,1078012801000,20.2,40.2,2.6\n"
+            "intel-lab-mote1,3,1078012802000,20.3,40.3,2.5\n";
+        QCOMPARE(file.write(csv), qint64(csv.size()));
+        file.close();
+        Harness h(file.fileName());
+        QTRY_COMPARE(h.socket.state(), QAbstractSocket::ConnectedState);
+        h.send("start", "start", {{"intervalMs", 300}});
+        QTRY_COMPARE(h.samples().size(), 1);
+        h.send("stop", "stop");
+        QTRY_VERIFY(!h.ack("stop").isEmpty());
+        QTimer window;
+        window.setSingleShot(true);
+        QSignalSpy elapsed(&window, &QTimer::timeout);
+        window.start(400);
+        QTRY_COMPARE(elapsed.count(), 1);
+        QCOMPARE(h.samples().size(), 1);
+        QVERIFY(h.ends().isEmpty());
+        h.send("resume", "start", {{"intervalMs", 20}});
+        QTRY_COMPARE(h.samples().size(), 3);
+        QTRY_COMPARE(h.ends().size(), 1);
+        QCOMPARE(h.messages.last().value("type").toString(), QStringLiteral("stream_end"));
+        QCOMPARE(h.samples().at(1).temperature, 20.2);
+        QCOMPARE(h.samples().at(1).timestampMs, qint64(1078012801000));
+        QCOMPARE(h.samples().at(2).temperature, 20.3);
+    }
+    void badReplayFailsBeforeBinding_data()
+    {
+        QTest::addColumn<QByteArray>("records");
+        QTest::newRow("missing-field") << QByteArray("intel-lab-mote1,1,1078012800000,20,40\n");
+        QTest::newRow("invalid-measurement") << QByteArray("intel-lab-mote1,1,1078012800000,nan,40,2.7\n");
+        QTest::newRow("out-of-order") << QByteArray("intel-lab-mote1,2,1078012801000,20,40,2.7\nintel-lab-mote1,1,1078012800000,20,40,2.7\n");
+        QTest::newRow("empty") << QByteArray();
+    }
+    void replayEndFollowsFaultedFinalFrame_data()
+    {
+        QTest::addColumn<QString>("mode");
+        QTest::newRow("fragmented-final") << QStringLiteral("fragment");
+        QTest::newRow("delayed-final") << QStringLiteral("delay");
+        QTest::newRow("malformed-final") << QStringLiteral("malformed");
+        QTest::newRow("disconnected-final") << QStringLiteral("disconnect");
+    }
+    void replayEndFollowsFaultedFinalFrame()
+    {
+        QFETCH(QString, mode);
+        QTemporaryDir directory;
+        QFile file(directory.filePath(QStringLiteral("final-fault.csv")));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray csv = "deviceId,sequence,timestampMs,temperature,humidity,voltage\n"
+            "intel-lab-mote1,1,1078012800000,20.1,40.1,2.7\n"
+            "intel-lab-mote1,2,1078012801000,20.2,40.2,2.6\n";
+        QCOMPARE(file.write(csv), qint64(csv.size()));
+        file.close();
+        Harness h(file.fileName());
+        QTRY_COMPARE(h.socket.state(), QAbstractSocket::ConnectedState);
+        h.send("fault", "fault", {{"mode", mode}, {"every", 2}});
+        h.send("start", "start", {{"intervalMs", 40}});
+        if (mode == QStringLiteral("disconnect")) {
+            QTRY_COMPARE(h.socket.state(), QAbstractSocket::UnconnectedState);
+            QCOMPARE(h.samples().size(), 1);
+            QVERIFY(h.ends().isEmpty());
+            return;
+        }
+        QTRY_COMPARE(h.ends().size(), 1);
+        QCOMPARE(h.ends().first().value("sequence").toDouble(), 2.0);
+        QCOMPARE(h.ends().first().value("deviceId").toString(), QStringLiteral("intel-lab-mote1"));
+        QCOMPARE(h.ends().first().value("reason").toString(), QStringLiteral("replay_finished"));
+        QCOMPARE(h.messages.last(), h.ends().first());
+        if (mode == QStringLiteral("malformed")) {
+            QCOMPARE(h.samples().size(), 1);
+            QCOMPARE(h.wireErrors.size(), 1);
+        } else {
+            QCOMPARE(h.samples().size(), 2);
+            QCOMPARE(h.messages.at(h.messages.size() - 2).value("type").toString(), QStringLiteral("sample"));
+            QCOMPARE(h.messages.at(h.messages.size() - 2).value("sequence").toDouble(), 2.0);
+            QVERIFY(h.wireErrors.isEmpty());
+        }
+        h.send("again", "start", {{"intervalMs", 10}});
+        QTRY_VERIFY(!h.ack("again").isEmpty());
+        QVERIFY(!h.ack("again").value("ok").toBool());
+        QCOMPARE(h.ends().size(), 1);
+    }
+    void badReplayFailsBeforeBinding()
+    {
+        QFETCH(QByteArray, records);
+        QTemporaryDir directory;
+        QFile file(directory.filePath(QStringLiteral("bad.csv")));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray csv = "deviceId,sequence,timestampMs,temperature,humidity,voltage\n" + records;
+        QCOMPARE(file.write(csv), qint64(csv.size()));
+        file.close();
+        QObject owner;
+        auto *simulator = wb_create_simulator(&owner);
+        simulator->setProperty("replayFile", file.fileName());
+        QSignalSpy listening(simulator, &wb::Simulator::listening);
+        QSignalSpy errors(simulator, &wb::Simulator::error);
+        simulator->listen(QStringLiteral("127.0.0.1"), 0);
+        QCOMPARE(listening.count(), 0);
+        QCOMPARE(errors.count(), 1);
+        QVERIFY(errors.first().first().toString().contains(QStringLiteral("replay_data_invalid")));
+        QCOMPARE(simulator->property("replayRows").toInt(), 0);
+    }
+    void missingReplayFailsAndSyntheticRemainsAvailable()
+    {
+        QTemporaryDir directory;
+        QObject owner;
+        auto *simulator = wb_create_simulator(&owner);
+        simulator->setProperty("replayFile", directory.filePath(QStringLiteral("absent.csv")));
+        QSignalSpy listening(simulator, &wb::Simulator::listening);
+        QSignalSpy errors(simulator, &wb::Simulator::error);
+        simulator->listen(QStringLiteral("127.0.0.1"), 0);
+        QCOMPARE(listening.count(), 0);
+        QCOMPARE(errors.count(), 1);
+        // Clearing the property explicitly selects the module's legacy synthetic fixture mode.
+        simulator->setProperty("replayFile", QVariant());
+        simulator->listen(QStringLiteral("127.0.0.1"), 0);
+        QCOMPARE(listening.count(), 1);
+        QCOMPARE(simulator->property("dataSource").toString(), QStringLiteral("synthetic_fixture"));
+        simulator->shutdown();
     }
 };
 QTEST_GUILESS_MAIN(DeviceSimulatorTest)

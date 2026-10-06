@@ -1,0 +1,38 @@
+{
+  "title": "Intel Berkeley Research Lab sensor data",
+  "publisherPage": "http://db.csail.mit.edu/labdata/labdata.html",
+  "downloadUrl": "http://db.csail.mit.edu/labdata/data.txt.gz",
+  "archiveSha256": "d99288c8f406ca6604d359ceaa0d8adfffa79e7095061a1e27dc4399f48c7225",
+  "archiveBytes": 34422518,
+  "retrievedDate": "2026-10-06",
+  "kind": "public measured records replayed by a simulated TCP device",
+  "selection": "First 4096 chronological complete, finite, in-contract readings of mote 1; raw numeric values retained; no interpolation or clipping",
+  "timestampConvention": "Original timezone unspecified; encode naive source clock as UTC milliseconds, truncate sub-millisecond precision; display UTC to retain source clock",
+  "sequenceConvention": "Transport sequence numbers are new counters; source epochs remain in source.txt",
+  "rows": 4096,
+  "firstSourceClock": "2004-02-28 00:59:16.02785",
+  "lastSourceClock": "2004-03-01 13:41:21.610086",
+  "units": {
+    "temperature": "degrees Celsius",
+    "humidity": "relative humidity percent",
+    "voltage": "volts"
+  },
+  "statistics": {
+    "totalSourceRows": 2313682,
+    "mote1SourceRows": 43047,
+    "mote1RejectedRows": 4383
+  },
+  "attribution": [
+    "Peter Bodik",
+    "Wei Hong",
+    "Carlos Guestrin",
+    "Sam Madden",
+    "Mark Paskin",
+    "Romain Thibaux"
+  ],
+  "rights": "Publisher permits use and reproduction; acknowledge original contributors. Data is separate from project MIT code license.",
+  "files": {
+    "intel-lab-mote1.csv": "e1214783843e4ab4ad6a169154655ca20dec75792c8ffbdbd20cf9470781f5ca",
+    "intel-lab-mote1.source.txt": "e4212d865d9bcd90d687db8a31706fdc17990e6cc2ee9b3736bbc6d48291c1d8"
+  }
+}

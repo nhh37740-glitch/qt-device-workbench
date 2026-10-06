@@ -69,14 +69,14 @@ class RealPrograms(unittest.TestCase):
         for log in self.logs:
             log.close()
 
-    def run_capture(self, mode='none', late_sink=False):
+    def run_capture(self, mode='none', late_sink=False, complete_replay=False):
         # Unique per-test files ensure output never relies on a previous run.
         dev_ready = self.folder / 'device-ready.json'
         sink_ready = self.folder / 'sink-ready.json'
         csv_path = self.folder / 'measurements.csv'
         output = self.folder / 'downstream.ndjson'
         report_path = self.folder / 'report.json'
-        duration = 4100 if late_sink else 3100
+        duration = 65000 if complete_replay else (4100 if late_sink else 3100)
         # Server lifetime must include child process startup/GUI initialization time.
         sim = self.launch('device-simulator', '--port', 0, '--ready-file', dev_ready, '--duration-ms', duration + 15000)
         device_port = self.ready(dev_ready, sim)
@@ -87,10 +87,11 @@ class RealPrograms(unittest.TestCase):
         else:
             receiver = self.launch('result-receiver', '--port', 0, '--output', output, '--ready-file', sink_ready, '--duration-ms', duration + 15000)
             sink_port = self.ready(sink_ready, receiver)
+        end_args = ['--quit-after-replay'] if complete_replay else []
         app = self.launch('device-workbench', '--headless', '--capture', '--device-port', device_port,
-                          '--sink-port', sink_port, '--interval-ms', 20, '--duration-ms', duration,
+                          '--sink-port', sink_port, '--interval-ms', 10 if complete_replay else 20, '--duration-ms', duration,
                           '--record', csv_path, '--report', report_path, '--fault', mode, '--fault-every', 7,
-                          '--screenshot', self.folder / 'interface.png')
+                          '--screenshot', self.folder / 'interface.png', *end_args)
         if late_sink:
             time.sleep(1.2)
             receiver = self.launch('result-receiver', '--port', sink_port, '--output', output, '--ready-file', sink_ready, '--duration-ms', duration + 15000)
@@ -120,9 +121,30 @@ class RealPrograms(unittest.TestCase):
             self.assertTrue(report['errors'], 'Malformed device messages must be reported')
         return report
 
-    def test_normal_capture_display_save_forward(self):
-        report = self.run_capture()
+    def assert_public_values(self, report):
         self.assertEqual(report['errors'], [], report)
+        with (self.exe('device-simulator').parent / 'data/intel-lab-mote1.csv').open(encoding='utf-8', newline='') as source:
+            public_rows = list(csv.DictReader(source))
+        with (self.folder / 'measurements.csv').open(encoding='utf-8-sig', newline='') as recorded:
+            saved_rows = list(csv.DictReader(recorded))
+        # Verify actual TCP -> GUI/CSV -> downstream values against the independent
+        # published excerpt, not just against each other.
+        for saved, original in zip(saved_rows, public_rows):
+            self.assertEqual(saved['deviceId'], original['deviceId'])
+            self.assertEqual(int(saved['timestampMs']), int(original['timestampMs']))
+            for field in ('temperature', 'humidity', 'voltage'):
+                self.assertEqual(float(saved[field]), float(original[field]))
+        self.assertEqual(report['samples'], len(saved_rows))
+        self.assertLessEqual(len(saved_rows), len(public_rows))
+
+    def test_normal_capture_display_save_forward(self):
+        self.assert_public_values(self.run_capture())
+
+    def test_complete_public_recording_saved_and_confirmed(self):
+        report = self.run_capture(complete_replay=True)
+        self.assert_public_values(report)
+        self.assertEqual(report['samples'], 4096, report)
+        self.assertTrue(report['replayFinished'], report)
 
     def test_fragmented_messages(self):
         self.run_capture('fragment')

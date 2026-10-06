@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][string]$QtRoot,[string]$Version='1.0.0')
+param([Parameter(Mandatory=$true)][string]$QtRoot,[string]$Version='1.1.1')
 $ErrorActionPreference='Stop'
 $projectRoot=Split-Path $PSScriptRoot -Parent
 $resolvedQt=(Resolve-Path -LiteralPath $QtRoot).Path
@@ -81,21 +81,28 @@ Microsoft compiler runtime redistributable DLLs are included for Windows x64 exe
        & "$runtime/binary-consumer.exe" $runtime
        if($LASTEXITCODE -ne 0){throw 'Delivered module DLL interface consumer failed'}
     } finally {$env:PATH=$originalPath}
+    Copy-Item -LiteralPath scripts/start-demo.ps1 -Destination "$packageRoot/start-demo.ps1"
     @'
-param([int]$Seconds=300)
-$ErrorActionPreference='Stop'
-$duration=$Seconds*1000
-$runtime=Join-Path $PSScriptRoot 'runtime'
-New-Item -ItemType Directory -Force -Path $runtime | Out-Null
-Start-Process -FilePath "$PSScriptRoot/programs/device-simulator/device-simulator.exe" -ArgumentList '--duration-ms',$duration -WindowStyle Hidden
-Start-Process -FilePath "$PSScriptRoot/programs/result-receiver/result-receiver.exe" -ArgumentList '--duration-ms',$duration,'--output',('"'+$runtime+'/downstream.ndjson"') -WindowStyle Hidden
-& "$PSScriptRoot/programs/device-workbench/device-workbench.exe" --capture --record "$runtime/measurements.csv" --duration-ms $duration
-'@ | Set-Content -LiteralPath "$packageRoot/start-demo.ps1" -Encoding utf8
+@echo off
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-demo.ps1"
+'@ | Set-Content -LiteralPath "$packageRoot/start-demo.cmd" -Encoding ascii
     & python tests/process_test.py --bin "$packageRoot/programs" --layout programs --evidence build/delivery-evidence
     if($LASTEXITCODE -ne 0){throw 'Binary-only deployment tests failed'}
+    $launcherEvidence=Join-Path $projectRoot "build/launcher-evidence-$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"
+    $launcherPath=$env:PATH;$launcherPlatform=$env:QT_QPA_PLATFORM
+    try {
+        $env:PATH="$env:SystemRoot/System32";$env:QT_QPA_PLATFORM='offscreen'
+        & "$env:SystemRoot/System32/WindowsPowerShell/v1.0/powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$packageRoot/start-demo.ps1" -Seconds 3 -OutputDirectory $launcherEvidence
+        if($LASTEXITCODE -ne 0){throw 'Demo launcher failed'}
+        $launcherReport=Get-Content -LiteralPath "$launcherEvidence/demo-report.json" -Raw | ConvertFrom-Json
+        if($launcherReport.samples -lt 5 -or $launcherReport.stored -ne $launcherReport.samples -or $launcherReport.delivered -ne $launcherReport.samples -or $launcherReport.errors.Count -gt 0){throw 'Demo launcher did not save and deliver real records'}
+        $leftover=Get-CimInstance Win32_Process | Where-Object {$_.Name -in @('device-simulator.exe','device-workbench.exe','result-receiver.exe') -and $_.ExecutablePath -like "$packageRoot*"}
+        if($leftover){throw 'Demo launcher left its services running'}
+    } finally {$env:PATH=$launcherPath;$env:QT_QPA_PLATFORM=$launcherPlatform}
     New-Item -ItemType Directory -Force -Path "$packageRoot/test-evidence" | Out-Null
     Copy-Item -LiteralPath build/module-tests.xml,build/process-evidence/summary.json -Destination "$packageRoot/test-evidence"
     Copy-Item -LiteralPath build/delivery-evidence/summary.json -Destination "$packageRoot/test-evidence/binary-only-summary.json"
+    Copy-Item -LiteralPath "$launcherEvidence/demo-report.json" -Destination "$packageRoot/test-evidence/launcher-report.json"
     @{passed=$true;modulesLoaded=7;usesModuleSources=$false;consumer='shared/bin/binary-consumer.exe'} | ConvertTo-Json | Set-Content -LiteralPath "$packageRoot/test-evidence/dll-consumer.json" -Encoding utf8
     $revision=(& git rev-parse HEAD).Trim()
     $files=@(Get-ChildItem -LiteralPath $packageRoot -Recurse -File | ForEach-Object {@{path=[IO.Path]::GetRelativePath($packageRoot,$_.FullName).Replace('\','/');size=$_.Length;sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLower()}})

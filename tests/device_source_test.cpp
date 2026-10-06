@@ -133,6 +133,77 @@ private slots:
         QVERIFY(results[2][2].toString().contains("timeout"));
     }
 
+    void streamEndValidatesAndDisablesAutomaticRestart_data() {
+        QTest::addColumn<bool>("skippedFinalSample");
+        QTest::newRow("matching-final-sequence") << false;
+        QTest::newRow("rejected-final-sample-gap") << true;
+    }
+    void streamEndValidatesAndDisablesAutomaticRestart() {
+        QFETCH(bool, skippedFinalSample);
+        QTcpServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        Worker worker;
+        QSignalSpy samples(worker.source, &wb::DeviceSource::sampleReady);
+        QSignalSpy statuses(worker.source, &wb::DeviceSource::status);
+        QSignalSpy errors(worker.source, &wb::DeviceSource::error);
+        auto finishedCount = [&] {
+            int count = 0;
+            for (const auto &event : statuses) if (event[0].toString() == "replay_finished") ++count;
+            return count;
+        };
+        const QJsonObject end{{"v", 1}, {"type", "stream_end"}, {"deviceId", "test-device"}, {"sequence", 99}, {"reason", "replay_finished"}};
+        worker.start(120);
+        worker.connectTo(server.serverPort());
+        QTRY_VERIFY(server.hasPendingConnections());
+        auto first = server.nextPendingConnection();
+        QTRY_VERIFY(first->canReadLine());
+        const auto start = QJsonDocument::fromJson(first->readLine()).object();
+        first->write(ack(start.value("id").toString()) + line(wb::sampleToJson(sample(99))));
+        QTRY_COMPARE(samples.count(), 1);
+        QByteArray invalids;
+        auto invalid = end;
+        invalid.insert("deviceId", "unrelated-device"); invalids += line(invalid);
+        invalid = end; invalid.insert("sequence", 98); invalids += line(invalid);
+        invalid = end; invalid.insert("sequence", "99"); invalids += line(invalid);
+        invalid = end; invalid.insert("sequence", 99.5); invalids += line(invalid);
+        invalid = end; invalid.insert("sequence", 0); invalids += line(invalid);
+        invalid = end; invalid.insert("sequence", 9007199254740992.0); invalids += line(invalid);
+        invalid = end; invalid.insert("reason", "other"); invalids += line(invalid);
+        invalid = end; invalid.remove("reason"); invalids += line(invalid);
+        invalid = end; invalid.insert("deviceId", ""); invalids += line(invalid);
+        invalid = end; invalid.insert("v", 2); invalids += line(invalid);
+        first->write(invalids);
+        QTRY_VERIFY(errors.count() >= 10);
+        QCOMPARE(finishedCount(), 0);
+        first->abort();
+        QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections(), 3500);
+        auto second = server.nextPendingConnection();
+        QTRY_VERIFY(second->canReadLine()); // Invalid end did not stop desired capture.
+        const auto resumed = QJsonDocument::fromJson(second->readLine()).object();
+        QCOMPARE(resumed.value("action").toString(), QString("start"));
+        auto terminal = end;
+        QByteArray last = line(wb::sampleToJson(sample(99)));
+        if (skippedFinalSample) {
+            auto malformedSample = wb::sampleToJson(sample(100));
+            malformedSample.insert("humidity", 101);
+            last += line(malformedSample);
+            terminal.insert("sequence", 100);
+        }
+        second->write(ack(resumed.value("id").toString()) + last + line(terminal));
+        QTRY_COMPARE(finishedCount(), 1);
+        QCOMPARE(samples.count(), 2); // Completion never fabricates a missing measurement.
+        second->abort();
+        QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections(), 3500);
+        auto third = server.nextPendingConnection();
+        QTest::qWait(180);
+        QVERIFY(!third->canReadLine()); // Completed replay is not automatically restarted.
+        worker.start(90); // Explicit user start restores intended acquisition.
+        QTRY_VERIFY(third->canReadLine());
+        const auto manual = QJsonDocument::fromJson(third->readLine()).object();
+        QCOMPARE(manual.value("action").toString(), QString("start"));
+        QCOMPARE(manual.value("intervalMs").toInt(), 90);
+        third->write(ack(manual.value("id").toString()));
+    }
     void requestedStartReconnectAndSequenceReset() {
         QTcpServer server;
         QVERIFY(server.listen(QHostAddress::LocalHost, 0));
